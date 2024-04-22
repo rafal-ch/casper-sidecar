@@ -3,12 +3,12 @@ use std::time::Duration;
 use bytes::{BufMut, BytesMut};
 use casper_binary_port::{BinaryResponse, BinaryResponseAndRequest, GlobalStateQueryResult};
 use casper_types::{bytesrepr::ToBytes, CLValue, ProtocolVersion, StoredValue};
-use juliet::{
-    io::IoCoreBuilder,
-    protocol::ProtocolBuilder,
-    rpc::{IncomingRequest, RpcBuilder},
-    ChannelConfiguration, ChannelId,
-};
+// use juliet::{
+//     io::IoCoreBuilder,
+//     protocol::ProtocolBuilder,
+//     rpc::{IncomingRequest, RpcBuilder},
+//     ChannelConfiguration, ChannelId,
+// };
 use tokio::task::JoinHandle;
 use tokio::{
     net::{TcpListener, TcpStream},

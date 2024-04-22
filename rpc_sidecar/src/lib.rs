@@ -4,8 +4,8 @@ mod node_client;
 mod rpcs;
 mod speculative_exec_config;
 mod speculative_exec_server;
-#[cfg(any(feature = "testing", test))]
-pub mod testing;
+//#[cfg(any(feature = "testing", test))]
+//pub mod testing;
 
 use anyhow::Error;
 use casper_types::ProtocolVersion;
@@ -18,7 +18,7 @@ use hyper::{
     server::{conn::AddrIncoming, Builder as ServerBuilder},
     Server,
 };
-pub use node_client::{Error as ClientError, JulietNodeClient, NodeClient};
+pub use node_client::{Error as ClientError, FramedNodeClient, NodeClient};
 pub use speculative_exec_config::Config as SpeculativeExecConfig;
 pub use speculative_exec_server::run as run_speculative_exec_server;
 use std::process::ExitCode;
@@ -35,8 +35,9 @@ pub const SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::from_pa
 pub const CLIENT_SHUTDOWN_EXIT_CODE: u8 = 0x3;
 
 pub type MaybeRpcServerReturn<'a> = Result<Option<BoxFuture<'a, Result<ExitCode, Error>>>, Error>;
+
 pub async fn build_rpc_server<'a>(config: RpcServerConfig) -> MaybeRpcServerReturn<'a> {
-    let (node_client, client_loop) = JulietNodeClient::new(config.node_client.clone()).await?;
+    let node_client = FramedNodeClient::new(config.node_client.clone()).await?;
     let node_client: Arc<dyn NodeClient> = Arc::new(node_client);
     let mut futures = Vec::new();
     let main_server_config = config.main_server;
@@ -55,10 +56,11 @@ pub async fn build_rpc_server<'a>(config: RpcServerConfig) -> MaybeRpcServerRetu
             futures.push(future);
         }
     }
-    let client_loop = client_loop
-        .map(|_| Ok(ExitCode::from(CLIENT_SHUTDOWN_EXIT_CODE)))
-        .boxed();
-    futures.push(client_loop);
+    // TODO[RC]: Check this
+    // let client_loop = client_loop
+    //     .map(|_| Ok(ExitCode::from(CLIENT_SHUTDOWN_EXIT_CODE)))
+    //     .boxed();
+    // futures.push(client_loop);
     Ok(Some(retype_future_vec(futures).boxed()))
 }
 

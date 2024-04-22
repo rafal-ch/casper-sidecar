@@ -1,6 +1,7 @@
 use crate::{config::ExponentialBackoffConfig, NodeClientConfig, SUPPORTED_PROTOCOL_VERSION};
 use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
 use metrics::rpc::{inc_disconnect, observe_reconnect_time};
 use serde::de::DeserializeOwned;
 use std::{
@@ -10,13 +11,14 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio_util::codec::Framed;
 
 use casper_binary_port::{
-    BalanceResponse, BinaryRequest, BinaryRequestHeader, BinaryResponse, BinaryResponseAndRequest,
-    ConsensusValidatorChanges, DictionaryItemIdentifier, DictionaryQueryResult, ErrorCode,
-    GetRequest, GetTrieFullResult, GlobalStateQueryResult, GlobalStateRequest, InformationRequest,
-    NodeStatus, PayloadEntity, PurseIdentifier, RecordId, SpeculativeExecutionResult,
-    TransactionWithExecutionInfo,
+    BalanceResponse, BinaryMessage, BinaryMessageCodec, BinaryRequest, BinaryRequestHeader,
+    BinaryResponse, BinaryResponseAndRequest, ConsensusValidatorChanges, DictionaryItemIdentifier,
+    DictionaryQueryResult, ErrorCode, GetRequest, GetTrieFullResult, GlobalStateQueryResult,
+    GlobalStateRequest, InformationRequest, NodeStatus, PayloadEntity, PurseIdentifier, RecordId,
+    SpeculativeExecutionResult, TransactionWithExecutionInfo,
 };
 use casper_types::{
     bytesrepr::{self, FromBytes, ToBytes},
@@ -24,12 +26,12 @@ use casper_types::{
     GlobalStateIdentifier, Key, KeyTag, Peers, ProtocolVersion, SignedBlock, StoredValue,
     Timestamp, Transaction, TransactionHash, Transfer,
 };
-use juliet::{
-    io::IoCoreBuilder,
-    protocol::ProtocolBuilder,
-    rpc::{JulietRpcClient, JulietRpcServer, RpcBuilder},
-    ChannelConfiguration, ChannelId,
-};
+// use juliet::{
+//     io::IoCoreBuilder,
+//     protocol::ProtocolBuilder,
+//     rpc::{JulietRpcClient, JulietRpcServer, RpcBuilder},
+//     ChannelConfiguration, ChannelId,
+// };
 use std::{
     fmt::{self, Display, Formatter},
     time::Instant,
@@ -37,7 +39,7 @@ use std::{
 use tokio::{
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
-        TcpStream,
+        TcpListener, TcpStream,
     },
     sync::{Notify, RwLock},
 };
@@ -305,6 +307,129 @@ impl Error {
     }
 }
 
+pub struct FramedNodeClient {
+    client: Arc<RwLock<Framed<TcpStream, BinaryMessageCodec>>>,
+    shutdown: Arc<Notify>,
+}
+
+impl FramedNodeClient {
+    pub async fn new(
+        config: NodeClientConfig,
+        //) -> Result<(Self, impl Future<Output = Result<(), AnyhowError>>), AnyhowError> {
+    ) -> Result<Self, AnyhowError> {
+        let stream =
+            Self::connect_with_retries(config.address, &config.exponential_backoff).await?;
+        //let (reader, writer) = stream.into_split();
+        // let (client, server) = rpc_builder.build(reader, writer);
+        // let client = Arc::new(RwLock::new(client));
+        let shutdown = Arc::new(Notify::new());
+        // let server_loop = Self::server_loop(
+        //     config.address,
+        //     config.exponential_backoff.clone(),
+        //     Arc::clone(&stream),
+        //     shutdown.clone(),
+        // );
+
+        Ok(Self {
+            client: Arc::new(RwLock::new(stream)),
+            shutdown,
+        })
+    }
+
+    async fn connect_with_retries(
+        addr: SocketAddr,
+        config: &ExponentialBackoffConfig,
+    ) -> Result<Framed<TcpStream, BinaryMessageCodec>, AnyhowError> {
+        let mut wait = config.initial_delay_ms;
+        let mut current_attempt = 1;
+        loop {
+            match TcpStream::connect(addr).await {
+                Ok(stream) => return Ok(Framed::new(stream, BinaryMessageCodec {})),
+                Err(err) => {
+                    warn!(%err, "failed to connect to the node, waiting {wait}ms before retrying");
+                    current_attempt += 1;
+                    if !config.max_attempts.can_attempt(current_attempt) {
+                        anyhow::bail!(
+                            "Couldn't connect to node {} after {} attempts",
+                            addr,
+                            current_attempt - 1
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                    wait = (wait * config.coefficient).min(config.max_delay_ms);
+                }
+            };
+        }
+    }
+}
+
+#[async_trait]
+impl NodeClient for FramedNodeClient {
+    async fn send_request(&self, req: BinaryRequest) -> Result<BinaryResponseAndRequest, Error> {
+        let header = BinaryRequestHeader::new(SUPPORTED_PROTOCOL_VERSION, req.tag());
+        let message = BinaryMessage::Request((header, req));
+        let mut client = self.client.write().await;
+
+        error!("XXXXX - sending binary message: {:?}", message);
+        client
+            .send(message.clone())
+            .await
+            .map_err(|err| Error::RequestFailed(err.to_string()))?;
+        error!("XXXXX - binary message sent");
+
+        // TODO[RC]: Check timeouts.
+        let response = match client.next().await {
+            Some(resp) => match resp {
+                Ok(message) => handle_response(message, &self.shutdown),
+                //Ok(binary_request) => BinaryResponseAndRequest::new(binary_request, &[]),
+                Err(err) => return Err(Error::RequestFailed(err.to_string())),
+            },
+            None => todo!("connection closed"),
+        };
+
+        response
+
+        // let payload = encode_request(&req).expect("should always serialize a request");
+        // let request_guard = self
+        //     .client
+        //     .read()
+        //     .await
+        //     .create_request(ChannelId::new(0))
+        //     .with_payload(payload.into())
+        //     .queue_for_sending()
+        //     .await;
+        // let response = request_guard
+        //     .wait_for_response()
+        //     .await
+        //     .map_err(|err| Error::RequestFailed(err.to_string()))?
+        //     .ok_or(Error::NoResponseBody)?;
+        // let resp = bytesrepr::deserialize_from_slice(&response)
+        //     .map_err(|err| Error::EnvelopeDeserialization(err.to_string()))?;
+        // handle_response(resp, &self.shutdown)
+    }
+}
+
+fn handle_response(
+    resp: BinaryMessage,
+    shutdown: &Notify,
+) -> Result<BinaryResponseAndRequest, Error> {
+    let BinaryMessage::Response(resp) = resp else {
+        // TODO[RC]: Got request instead of response.
+        return Err(Error::EmptyEnvelope);
+    };
+
+    let version = resp.response().protocol_version();
+
+    if version.is_compatible_with(&SUPPORTED_PROTOCOL_VERSION) {
+        Ok(resp)
+    } else {
+        info!("received a response with incompatible major version from the node {version}, shutting down");
+        shutdown.notify_one();
+        Err(Error::UnsupportedProtocolVersion(version))
+    }
+}
+
+/*
 const CHANNEL_COUNT: usize = 1;
 
 #[derive(Debug)]
@@ -475,6 +600,7 @@ fn encode_request(req: &BinaryRequest) -> Result<Vec<u8>, bytesrepr::Error> {
     req.write_bytes(&mut bytes)?;
     Ok(bytes)
 }
+*/
 
 fn parse_response<A>(resp: &BinaryResponse) -> Result<Option<A>, Error>
 where

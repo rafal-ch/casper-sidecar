@@ -56,11 +56,6 @@ pub async fn build_rpc_server<'a>(config: RpcServerConfig) -> MaybeRpcServerRetu
             futures.push(future);
         }
     }
-    // TODO[RC]: Check this
-    // let client_loop = client_loop
-    //     .map(|_| Ok(ExitCode::from(CLIENT_SHUTDOWN_EXIT_CODE)))
-    //     .boxed();
-    // futures.push(client_loop);
     Ok(Some(retype_future_vec(futures).boxed()))
 }
 

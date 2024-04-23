@@ -285,6 +285,8 @@ pub enum Error {
     UnexpectedNodeError { message: String, code: u8 },
     #[error("received an binary message that is not a response")]
     GotRequestInsteadOfResponse,
+    #[error("unable to connect to binary port")]
+    ConnectionFailed,
 }
 
 impl Error {
@@ -312,29 +314,19 @@ impl Error {
 pub struct FramedNodeClient {
     client: Arc<RwLock<Framed<TcpStream, BinaryMessageCodec>>>,
     shutdown: Arc<Notify>,
+    config: NodeClientConfig,
 }
 
 impl FramedNodeClient {
-    pub async fn new(
-        config: NodeClientConfig,
-        //) -> Result<(Self, impl Future<Output = Result<(), AnyhowError>>), AnyhowError> {
-    ) -> Result<Self, AnyhowError> {
+    pub async fn new(config: NodeClientConfig) -> Result<Self, AnyhowError> {
         let stream =
             Self::connect_with_retries(config.address, &config.exponential_backoff).await?;
-        //let (reader, writer) = stream.into_split();
-        // let (client, server) = rpc_builder.build(reader, writer);
-        // let client = Arc::new(RwLock::new(client));
         let shutdown = Arc::new(Notify::new());
-        // let server_loop = Self::server_loop(
-        //     config.address,
-        //     config.exponential_backoff.clone(),
-        //     Arc::clone(&stream),
-        //     shutdown.clone(),
-        // );
 
         Ok(Self {
             client: Arc::new(RwLock::new(stream)),
             shutdown,
+            config,
         })
     }
 
@@ -363,6 +355,19 @@ impl FramedNodeClient {
             };
         }
     }
+
+    async fn reconnect(
+        addr: SocketAddr,
+        config: &ExponentialBackoffConfig,
+    ) -> Result<Framed<TcpStream, BinaryMessageCodec>, AnyhowError> {
+        let disconnected_start = Instant::now();
+        inc_disconnect();
+        error!("node connection closed, will attempt to reconnect");
+        let stream = Self::connect_with_retries(addr, &config).await?;
+        info!("connection with the node has been re-established");
+        observe_reconnect_time(disconnected_start.elapsed());
+        Ok(stream)
+    }
 }
 
 #[async_trait]
@@ -371,23 +376,26 @@ impl NodeClient for FramedNodeClient {
         let message: BinaryMessage = req.into();
         let mut client = self.client.write().await;
 
-        error!("XXXXX - sending binary message: {:?}", message);
         client
             .send(message.clone())
             .await
             .map_err(|err| Error::RequestFailed(err.to_string()))?;
-        error!("XXXXX - binary message sent");
 
         // TODO[RC]: Check timeouts.
         let response = match client.next().await {
             Some(resp) => match resp {
                 Ok(message) => handle_response(message, &self.shutdown),
-                //Ok(binary_request) => BinaryResponseAndRequest::new(binary_request, &[]),
                 Err(err) => return Err(Error::RequestFailed(err.to_string())),
             },
-            None => todo!("connection closed"),
+            None => {
+                let stream = Self::reconnect(self.config.address, &self.config.exponential_backoff)
+                    .await
+                    .map_err(|_| Error::ConnectionFailed)?;
+                *client = stream;
+                // Reconnect, but still report a failure to the client.
+                return Err(Error::RequestFailed("Disconnected".to_owned()));
+            }
         };
-        error!("XXXXX - got response: {:?}", response);
         response
 
         // let payload = encode_request(&req).expect("should always serialize a request");

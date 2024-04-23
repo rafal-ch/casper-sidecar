@@ -366,8 +366,7 @@ impl FramedNodeClient {
 #[async_trait]
 impl NodeClient for FramedNodeClient {
     async fn send_request(&self, req: BinaryRequest) -> Result<BinaryResponseAndRequest, Error> {
-        let header = BinaryRequestHeader::new(SUPPORTED_PROTOCOL_VERSION, req.tag());
-        let message = BinaryMessage::Request((header, req));
+        let message: BinaryMessage = req.into();
         let mut client = self.client.write().await;
 
         error!("XXXXX - sending binary message: {:?}", message);
@@ -386,7 +385,7 @@ impl NodeClient for FramedNodeClient {
             },
             None => todo!("connection closed"),
         };
-
+        error!("XXXXX - got response: {:?}", response);
         response
 
         // let payload = encode_request(&req).expect("should always serialize a request");

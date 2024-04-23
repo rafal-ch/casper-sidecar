@@ -283,6 +283,8 @@ pub enum Error {
     UnsupportedProtocolVersion(ProtocolVersion),
     #[error("received an unexpected node error: {message} ({code})")]
     UnexpectedNodeError { message: String, code: u8 },
+    #[error("received an binary message that is not a response")]
+    GotRequestInsteadOfResponse,
 }
 
 impl Error {
@@ -413,8 +415,7 @@ fn handle_response(
     shutdown: &Notify,
 ) -> Result<BinaryResponseAndRequest, Error> {
     let BinaryMessage::Response(resp) = resp else {
-        // TODO[RC]: Got request instead of response.
-        return Err(Error::EmptyEnvelope);
+        return Err(Error::GotRequestInsteadOfResponse);
     };
 
     let version = resp.response().protocol_version();

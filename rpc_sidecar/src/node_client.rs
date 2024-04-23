@@ -376,13 +376,20 @@ impl NodeClient for FramedNodeClient {
         let message: BinaryMessage = req.into();
         let mut client = self.client.write().await;
 
-        client
-            .send(message.clone())
+        // TODO[RC]: Read timeout from config.
+        if let Err(err) = tokio::time::timeout(Duration::from_secs(5), client.send(message))
             .await
-            .map_err(|err| Error::RequestFailed(err.to_string()))?;
+            .map_err(|_| Error::RequestFailed("timeout".to_owned()))?
+        {
+            return Err(Error::RequestFailed(err.to_string()));
+        };
 
-        // TODO[RC]: Check timeouts.
-        let response = match client.next().await {
+        let Ok(next_frame) = tokio::time::timeout(Duration::from_secs(5), client.next()).await
+        else {
+            return Err(Error::RequestFailed("timeout".to_owned()));
+        };
+
+        let response = match next_frame {
             Some(resp) => match resp {
                 Ok(message) => handle_response(message, &self.shutdown),
                 Err(err) => return Err(Error::RequestFailed(err.to_string())),
@@ -393,28 +400,10 @@ impl NodeClient for FramedNodeClient {
                     .map_err(|_| Error::ConnectionFailed)?;
                 *client = stream;
                 // Reconnect, but still report a failure to the client.
-                return Err(Error::RequestFailed("Disconnected".to_owned()));
+                return Err(Error::RequestFailed("disconnected".to_owned()));
             }
         };
         response
-
-        // let payload = encode_request(&req).expect("should always serialize a request");
-        // let request_guard = self
-        //     .client
-        //     .read()
-        //     .await
-        //     .create_request(ChannelId::new(0))
-        //     .with_payload(payload.into())
-        //     .queue_for_sending()
-        //     .await;
-        // let response = request_guard
-        //     .wait_for_response()
-        //     .await
-        //     .map_err(|err| Error::RequestFailed(err.to_string()))?
-        //     .ok_or(Error::NoResponseBody)?;
-        // let resp = bytesrepr::deserialize_from_slice(&response)
-        //     .map_err(|err| Error::EnvelopeDeserialization(err.to_string()))?;
-        // handle_response(resp, &self.shutdown)
     }
 }
 
